@@ -14,10 +14,21 @@ mov ah, 9                     ; DOS job 9: print text ending with $
 int 21h                       ; print it
 call draw_display             ; rows 1-3
 call draw_keypad              ; rows 4-24
+call init_mouse               ; look for a mouse and show its pointer
 ;----------------------------------------
 main_loop:
+    mov ah, 1                 ; keyboard job 1: is a key waiting?
+    int 16h                   ; zero flag = 1 when no key is waiting
+    jnz ml_key                ; a key is waiting: go and read it
+    call check_mouse          ; no key: look at the mouse, AL = key of a clicked button
+    cmp al, 0                 ; was a button clicked?
+    je main_loop              ; no: keep looking
+    jmp ml_got                ; yes: AL already holds the key
+ml_key:
     mov ah, 0                 ; keyboard job 0: wait for a key
     int 16h                   ; AL = the ASCII code of the key
+    call key_flash            ; light up the button that belongs to this key
+ml_got:
     cmp al, 27                ; is it ESC?
     je quit                   ; yes: leave
     cmp al, 8                 ; is it Backspace?
@@ -58,12 +69,20 @@ main_loop:
     je do_op                  ; yes: handle the operator
     cmp al, 'k'               ; is it k (the nCr button)?
     je do_op                  ; yes: handle the operator
+    cmp al, 'p'               ; is it p (nPr)?
+    je do_op                  ; yes: handle the operator
+    cmp al, '!'               ; is it ! (factorial)?
+    je do_fact                ; yes: take the factorial
+    cmp al, 'M'               ; is it a capital M (M minus)?
+    je do_mminus              ; yes: subtract from the memory
     cmp al, '0'               ; below '0'?
-    jb main_loop              ; not a digit, wait for the next key
+    jb ml_ignore              ; not a digit, wait for the next key
     cmp al, '9'               ; above '9'?
-    ja main_loop              ; not a digit, wait for the next key
+    ja ml_ignore              ; not a digit, wait for the next key
     call add_digit            ; it is a digit: store it and show it
     jmp main_loop             ; wait for the next key
+ml_ignore:
+    jmp main_loop             ; ignore this key and wait for the next one
 quit:
     mov ax, 4C00h             ; DOS job 4Ch: close the program
     int 21h                   ; exit
@@ -99,6 +118,12 @@ do_rcl:
     jmp main_loop             ; wait for the next key
 do_sqrt:
     call press_sqrt           ; take the square root
+    jmp main_loop             ; wait for the next key
+do_fact:
+    call press_fact           ; take the factorial
+    jmp main_loop             ; wait for the next key
+do_mminus:
+    call press_mminus         ; subtract from the memory
     jmp main_loop             ; wait for the next key
 ;-----------------------------------------
 draw_display proc             ; display box rows 1-3, the 0 is on row 2
@@ -630,7 +655,7 @@ pe_done:
 press_equals endp
 
 calculate proc                ; cur = first (op) cur. Carry flag = error
-    call do_more              ; try ^ e k first: DL = 0 other, 1 = answer in AX, 2 = error
+    call do_more              ; try ^ e k p first: DL = 0 other, 1 = answer in AX, 2 = error
     cmp dl, 0                 ; was it a different operator?
     je ca_basic               ; yes: carry on with + - * /
     cmp dl, 2                 ; was there an error?
@@ -704,90 +729,6 @@ dp_error:
     stc                       ; carry = 1: there was an error
     ret                       ; back
 do_power endp
-
-do_more proc                  ; works out ^ e k. DL: 0 = other operator, 1 = AX holds the answer, 2 = error
-    cmp byte ptr [op], '^'    ; power?
-    jne dm_not_pow            ; no: try the next one
-    call do_power             ; AX = first ^ cur
-    jc dm_error               ; carry set: error
-    jmp dm_ok                 ; done
-dm_not_pow:
-    cmp byte ptr [op], 'e'    ; EXP?
-    jne dm_not_exp            ; no: try the next one
-    call do_exp               ; AX = first * 10 ^ cur
-    jc dm_error               ; carry set: error
-    jmp dm_ok                 ; done
-dm_not_exp:
-    cmp byte ptr [op], 'k'    ; nCr?
-    jne dm_other              ; no: it is not one of ours
-    call do_ncr               ; AX = first nCr cur
-    jc dm_error               ; carry set: error
-    jmp dm_ok                 ; done
-dm_other:
-    mov dl, 0                 ; not one of ^ e k
-    ret                       ; back
-dm_ok:
-    mov dl, 1                 ; AX holds the answer
-    ret                       ; back
-dm_error:
-    mov dl, 2                 ; there was an error
-    ret                       ; back
-do_more endp
-
-do_exp proc                   ; AX = first * 10 ^ cur. Carry flag = error
-    cmp word ptr [cur], 0     ; negative exponent?
-    jl de_error               ; yes: whole numbers cannot do that
-    mov cx, [cur]             ; CX = how many times to multiply by 10
-    mov ax, [first]           ; AX = the result so far
-de_loop:
-    cmp cx, 0                 ; any multiplications left?
-    je de_done                ; no: AX holds the result
-    mov bx, 10                ; BX = 10
-    imul bx                   ; DX:AX = AX * 10 (signed)
-    jo de_error               ; overflow: result too big
-    dec cx                    ; one multiplication fewer
-    jmp de_loop               ; repeat
-de_done:
-    clc                       ; carry = 0: no error
-    ret                       ; back
-de_error:
-    stc                       ; carry = 1: there was an error
-    ret                       ; back
-do_exp endp
-
-do_ncr proc                   ; AX = first nCr cur (n choose r). Carry flag = error
-    mov ax, [first]           ; AX = n
-    cmp ax, 0                 ; n below zero?
-    jl dc_error               ; yes: error
-    mov bx, [cur]             ; BX = r
-    cmp bx, 0                 ; r below zero?
-    jl dc_error               ; yes: error
-    cmp bx, ax                ; r bigger than n?
-    jg dc_error               ; yes: error
-    sub ax, bx                ; AX = n - r
-    mov si, ax                ; SI = n - r
-    mov cx, 1                 ; CX = i, the step we are on
-    mov ax, 1                 ; AX = the result so far
-dc_loop:
-    cmp cx, bx                ; is i past r?
-    ja dc_done                ; yes: AX holds the result
-    mov di, si                ; DI = n - r
-    add di, cx                ; DI = n - r + i
-    mul di                    ; DX:AX = result * (n - r + i)
-    cmp dx, cx                ; would the division overflow?
-    jae dc_error              ; yes: the answer is too big
-    div cx                    ; AX = DX:AX / i
-    cmp ax, 7FFFh             ; too big for a signed number?
-    ja dc_error               ; yes: error
-    inc cx                    ; next step
-    jmp dc_loop               ; repeat
-dc_done:
-    clc                       ; carry = 0: no error
-    ret                       ; back
-dc_error:
-    stc                       ; carry = 1: there was an error
-    ret                       ; back
-do_ncr endp
 
 number_to_text proc           ; AX = signed number -> text in buf, length in len
     mov di, 0                 ; DI = 1 if the number is negative
@@ -884,6 +825,7 @@ press_mplus proc              ; the M+ button
     mov ax, [cur]             ; AX = the current number
     add [mem], ax             ; add it to the memory
     mov byte ptr [fresh], 2   ; the next digit starts a new number
+    call show_memflag         ; show or hide the M on the top row
     ret                       ; back
 press_mplus endp
 
@@ -914,6 +856,1171 @@ psr_error:
     call show_error           ; show E
     ret                       ; back
 press_sqrt endp
+do_more proc                  ; works out ^ e k p. DL: 0 = other operator, 1 = AX holds the answer, 2 = error
+    cmp byte ptr [op], '^'    ; power?
+    jne dm_not_pow            ; no: try the next one
+    call do_power             ; AX = first ^ cur
+    jc dm_error               ; carry set: error
+    jmp dm_ok                 ; done
+dm_not_pow:
+    cmp byte ptr [op], 'e'    ; EXP?
+    jne dm_not_exp            ; no: try the next one
+    call do_exp               ; AX = first * 10 ^ cur
+    jc dm_error               ; carry set: error
+    jmp dm_ok                 ; done
+dm_not_exp:
+    cmp byte ptr [op], 'k'    ; nCr?
+    jne dm_not_ncr            ; no: try the next one
+    call do_ncr               ; AX = first nCr cur
+    jc dm_error               ; carry set: error
+    jmp dm_ok                 ; done
+dm_not_ncr:
+    cmp byte ptr [op], 'p'    ; nPr?
+    jne dm_other              ; no: it is not one of ours
+    call do_npr               ; AX = first nPr cur
+    jc dm_error               ; carry set: error
+    jmp dm_ok                 ; done
+dm_other:
+    mov dl, 0                 ; not one of ^ e k p
+    ret                       ; back
+dm_ok:
+    mov dl, 1                 ; AX holds the answer
+    ret                       ; back
+dm_error:
+    mov dl, 2                 ; there was an error
+    ret                       ; back
+do_more endp
+
+do_exp proc                   ; AX = first * 10 ^ cur. Carry flag = error
+    cmp word ptr [cur], 0     ; negative exponent?
+    jl de_error               ; yes: whole numbers cannot do that
+    mov cx, [cur]             ; CX = how many times to multiply by 10
+    mov ax, [first]           ; AX = the result so far
+de_loop:
+    cmp cx, 0                 ; any multiplications left?
+    je de_done                ; no: AX holds the result
+    mov bx, 10                ; BX = 10
+    imul bx                   ; DX:AX = AX * 10 (signed)
+    jo de_error               ; overflow: result too big
+    dec cx                    ; one multiplication fewer
+    jmp de_loop               ; repeat
+de_done:
+    clc                       ; carry = 0: no error
+    ret                       ; back
+de_error:
+    stc                       ; carry = 1: there was an error
+    ret                       ; back
+do_exp endp
+
+do_ncr proc                   ; AX = first nCr cur (n choose r). Carry flag = error
+    mov ax, [first]           ; AX = n
+    cmp ax, 0                 ; n below zero?
+    jl dc_error               ; yes: error
+    mov bx, [cur]             ; BX = r
+    cmp bx, 0                 ; r below zero?
+    jl dc_error               ; yes: error
+    cmp bx, ax                ; r bigger than n?
+    jg dc_error               ; yes: error
+    sub ax, bx                ; AX = n - r
+    mov si, ax                ; SI = n - r
+    mov cx, 1                 ; CX = i, the step we are on
+    mov ax, 1                 ; AX = the result so far
+dc_loop:
+    cmp cx, bx                ; is i past r?
+    ja dc_done                ; yes: AX holds the result
+    mov di, si                ; DI = n - r
+    add di, cx                ; DI = n - r + i
+    mul di                    ; DX:AX = result * (n - r + i)
+    cmp dx, cx                ; would the division overflow?
+    jae dc_error              ; yes: the answer is too big
+    div cx                    ; AX = DX:AX / i
+    cmp ax, 7FFFh             ; too big for a signed number?
+    ja dc_error               ; yes: error
+    inc cx                    ; next step
+    jmp dc_loop               ; repeat
+dc_done:
+    clc                       ; carry = 0: no error
+    ret                       ; back
+dc_error:
+    stc                       ; carry = 1: there was an error
+    ret                       ; back
+do_ncr endp
+
+do_npr proc                   ; AX = first nPr cur. Carry flag = error
+    mov ax, [first]           ; AX = n
+    cmp ax, 0                 ; n below zero?
+    jl dn_error               ; yes: error
+    mov bx, [cur]             ; BX = r
+    cmp bx, 0                 ; r below zero?
+    jl dn_error               ; yes: error
+    cmp bx, ax                ; r bigger than n?
+    jg dn_error               ; yes: error
+    mov cx, [cur]             ; CX = how many factors to multiply
+    mov si, [first]           ; SI = the factor we are on (starts at n)
+    mov ax, 1                 ; AX = the result so far
+dn_loop:
+    cmp cx, 0                 ; any factors left?
+    je dn_done                ; no: AX holds the result
+    imul si                   ; DX:AX = AX * SI (signed)
+    jo dn_error               ; overflow: result too big
+    dec si                    ; next factor is one smaller
+    dec cx                    ; one factor fewer
+    jmp dn_loop               ; repeat
+dn_done:
+    clc                       ; carry = 0: no error
+    ret                       ; back
+dn_error:
+    stc                       ; carry = 1: there was an error
+    ret                       ; back
+do_npr endp
+
+press_fact proc               ; the ! key (factorial of the current number)
+    mov cx, [cur]             ; CX = the number
+    cmp cx, 0                 ; below zero?
+    jl pf_error               ; yes: error
+    mov ax, 1                 ; AX = the result so far
+    mov bx, 2                 ; BX = the next factor
+pf_loop:
+    cmp bx, cx                ; is the factor past the number?
+    ja pf_done                ; yes: AX holds the result
+    imul bx                   ; DX:AX = AX * BX (signed)
+    jo pf_error               ; overflow: result too big
+    inc bx                    ; next factor
+    jmp pf_loop               ; repeat
+pf_done:
+    call show_value           ; show it
+    ret                       ; back
+pf_error:
+    call show_error           ; show E
+    ret                       ; back
+press_fact endp
+
+press_mminus proc             ; the capital M key: subtract from the memory
+    mov ax, [cur]             ; AX = the current number
+    sub [mem], ax             ; subtract it from the memory
+    mov byte ptr [fresh], 2   ; the next digit starts a new number
+    call show_memflag         ; show or hide the M on the top row
+    ret                       ; back
+press_mminus endp
+
+show_memflag proc             ; shows an M on the top row while the memory is not zero
+    mov dh, 0                 ; row 0
+    mov dl, 40                ; column 40
+    call set_cursor           ; go there
+    mov al, ' '               ; a blank ...
+    cmp word ptr [mem], 0     ; is the memory empty?
+    je sm_draw                ; yes: print the blank
+    mov al, 'M'               ; no: print an M instead
+sm_draw:
+    call put_char             ; print it
+    ret                       ; back
+show_memflag endp
+
+init_mouse proc               ; looks for a mouse driver
+    mov ax, 0                 ; mouse job 0: reset and look for a mouse
+    int 33h                   ; AX = 0FFFFh when a mouse is installed
+    cmp ax, 0FFFFh            ; did we find one?
+    jne im_done               ; no: the keyboard still works
+    mov byte ptr [mouse_ok], 1; remember that the mouse works
+    mov ax, 1                 ; mouse job 1: show the pointer
+    int 33h                   ; do it
+im_done:
+    ret                       ; back
+init_mouse endp
+
+delay proc                    ; short flash pause: one clock tick, about 55 ms
+    mov ah, 0                 ; clock job 0: read the tick counter
+    int 1Ah                   ; DX = current clock tick
+    mov bx, dx                ; save the starting tick
+dl_wait:
+    mov ah, 0                 ; read the clock again
+    int 1Ah                   ; DX = current clock tick
+    cmp dx, bx                ; has the tick changed?
+    je dl_wait                ; no: keep waiting for one tick
+    ret                       ; back
+delay endp
+
+paint_button proc             ; FAST: changes only the color bytes in video memory
+    push ax                   ; preserve registers used by this procedure
+    push bx                   ; preserve BX
+    push cx                   ; preserve CX
+    push dx                   ; preserve DX
+    push si                   ; preserve SI
+    push di                   ; preserve DI
+    push es                   ; preserve the extra segment register
+    mov ax, 0B800h             ; color text screen memory starts at B800h
+    mov es, ax                 ; ES now points to the screen
+    xor ax, ax                ; clear AX before loading the row number
+    mov al, [fb_row]          ; AL = first row of the button
+    mov bx, 160               ; each screen row uses 160 bytes (80 x 2)
+    mul bx                    ; AX = row number multiplied by 160
+    mov di, ax                ; DI = byte position of the first row
+    xor ax, ax                ; clear AX before loading the column
+    mov al, [fb_col]          ; AL = first column of the button
+    shl ax, 1                 ; each character cell uses 2 bytes
+    add di, ax                ; DI = exact video-memory position
+    mov si, 0                 ; SI counts the three button rows
+pb_row:
+    mov al, [fb_attr]         ; AL = color attribute to apply
+    xor cx, cx                ; clear CX before loading the width
+    mov cl, [fb_w]            ; CX = total button width
+pb_col:
+    mov byte ptr es:[di+1], al; change only the color byte, keep the letter
+    add di, 2                 ; move to the next character cell
+    loop pb_col               ; repeat until this row is colored
+    mov bx, 160               ; each screen row is 160 bytes
+    xor ax, ax                ; clear AX before loading the width
+    mov al, [fb_w]            ; AL = number of columns already painted
+    shl ax, 1                 ; convert columns to bytes
+    sub bx, ax                ; remaining bytes to the same column next row
+    add di, bx                ; move DI to the button's next row
+    inc si                    ; one button row is finished
+    cmp si, 3                 ; have all three rows been painted?
+    jb pb_row                 ; no: paint the next row
+    pop es                    ; restore ES
+    pop di                    ; restore DI
+    pop si                    ; restore SI
+    pop dx                    ; restore DX
+    pop cx                    ; restore CX
+    pop bx                    ; restore BX
+    pop ax                    ; restore AX
+    ret                       ; back
+paint_button endp
+
+do_flash proc                 ; DH = row, DL = column of the button corner, CL = inner width
+    mov [fb_row], dh          ; remember the row
+    mov [fb_col], dl          ; remember the column
+    add cl, 2                 ; CL = whole width of the box
+    mov [fb_w], cl            ; remember the width
+    cmp byte ptr [mouse_ok], 1; is there a mouse pointer on the screen?
+    jne df_nohide             ; no: nothing to hide
+    mov ax, 2                 ; mouse job 2: hide the pointer
+    int 33h                   ; do it
+df_nohide:
+    mov byte ptr [fb_attr], 70h; inverse colors
+    call paint_button         ; paint the button in the new colors
+    call delay                ; wait a moment
+    mov byte ptr [fb_attr], 07h; normal colors
+    call paint_button         ; paint it back
+    cmp byte ptr [mouse_ok], 1; is there a mouse pointer?
+    jne df_done               ; no: finished
+    mov ax, 1                 ; mouse job 1: show the pointer again
+    int 33h                   ; do it
+df_done:
+    ret                       ; back
+do_flash endp
+
+check_mouse proc              ; AL = key code of the clicked button, 0 = nothing
+    cmp byte ptr [mouse_ok], 1; is there a mouse?
+    je cm_read                ; yes: read it
+    mov al, 0                 ; no mouse: nothing was clicked
+    ret                       ; back
+cm_read:
+    mov ax, 3                 ; mouse job 3: read position and buttons
+    int 33h                   ; BX = buttons, CX = x, DX = y
+    test bx, 1                ; is the left button down?
+    jnz cm_down               ; yes
+    mov byte ptr [mouse_down], 0; no: remember that the button is up
+    mov al, 0                 ; nothing was clicked
+    ret                       ; back
+cm_down:
+    cmp byte ptr [mouse_down], 0; was it already down?
+    je cm_new                 ; no: this is a new click
+    mov al, 0                 ; it is only being held: nothing new
+    ret                       ; back
+cm_new:
+    mov byte ptr [mouse_down], 1; remember that the button is down
+    mov bx, cx                ; BX = x in pixels
+    mov cl, 3                 ; shift by 3 = divide by 8
+    shr bx, cl                ; BX = column
+    shr dx, cl                ; DX = row
+    mov dh, dl                ; DH = row of the click
+    mov dl, bl                ; DL = column of the click
+    cmp dh, 4                 ; button SHIFT: is the click above its top row?
+    jb hn01                   ; yes: not this button
+    cmp dh, 6                 ; button SHIFT: is the click below its bottom row?
+    ja hn01                   ; yes: not this button
+    cmp dl, 4                 ; button SHIFT: is the click left of it?
+    jb hn01                   ; yes: not this button
+    cmp dl, 11                ; button SHIFT: is the click right of it?
+    ja hn01                   ; yes: not this button
+    mov al, 0                 ; button SHIFT: the key code it stands for (0 = none yet)
+    mov dh, 4                 ; button SHIFT: its top row
+    mov dl, 4                 ; button SHIFT: its left column
+    mov cl, 6                 ; button SHIFT: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn01:
+    cmp dh, 4                 ; button ALPHA: is the click above its top row?
+    jb hn02                   ; yes: not this button
+    cmp dh, 6                 ; button ALPHA: is the click below its bottom row?
+    ja hn02                   ; yes: not this button
+    cmp dl, 12                ; button ALPHA: is the click left of it?
+    jb hn02                   ; yes: not this button
+    cmp dl, 19                ; button ALPHA: is the click right of it?
+    ja hn02                   ; yes: not this button
+    mov al, 0                 ; button ALPHA: the key code it stands for (0 = none yet)
+    mov dh, 4                 ; button ALPHA: its top row
+    mov dl, 12                ; button ALPHA: its left column
+    mov cl, 6                 ; button ALPHA: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn02:
+    cmp dh, 4                 ; button REPLAY: is the click above its top row?
+    jb hn03                   ; yes: not this button
+    cmp dh, 6                 ; button REPLAY: is the click below its bottom row?
+    ja hn03                   ; yes: not this button
+    cmp dl, 20                ; button REPLAY: is the click left of it?
+    jb hn03                   ; yes: not this button
+    cmp dl, 27                ; button REPLAY: is the click right of it?
+    ja hn03                   ; yes: not this button
+    mov al, 0                 ; button REPLAY: the key code it stands for (0 = none yet)
+    mov dh, 4                 ; button REPLAY: its top row
+    mov dl, 20                ; button REPLAY: its left column
+    mov cl, 6                 ; button REPLAY: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn03:
+    cmp dh, 4                 ; button MODE: is the click above its top row?
+    jb hn04                   ; yes: not this button
+    cmp dh, 6                 ; button MODE: is the click below its bottom row?
+    ja hn04                   ; yes: not this button
+    cmp dl, 28                ; button MODE: is the click left of it?
+    jb hn04                   ; yes: not this button
+    cmp dl, 35                ; button MODE: is the click right of it?
+    ja hn04                   ; yes: not this button
+    mov al, 0                 ; button MODE: the key code it stands for (0 = none yet)
+    mov dh, 4                 ; button MODE: its top row
+    mov dl, 28                ; button MODE: its left column
+    mov cl, 6                 ; button MODE: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn04:
+    cmp dh, 4                 ; button ON: is the click above its top row?
+    jb hn05                   ; yes: not this button
+    cmp dh, 6                 ; button ON: is the click below its bottom row?
+    ja hn05                   ; yes: not this button
+    cmp dl, 36                ; button ON: is the click left of it?
+    jb hn05                   ; yes: not this button
+    cmp dl, 43                ; button ON: is the click right of it?
+    ja hn05                   ; yes: not this button
+    mov al, 0                 ; button ON: the key code it stands for (0 = none yet)
+    mov dh, 4                 ; button ON: its top row
+    mov dl, 36                ; button ON: its left column
+    mov cl, 6                 ; button ON: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn05:
+    cmp dh, 4                 ; button x^-1: is the click above its top row?
+    jb hn06                   ; yes: not this button
+    cmp dh, 6                 ; button x^-1: is the click below its bottom row?
+    ja hn06                   ; yes: not this button
+    cmp dl, 44                ; button x^-1: is the click left of it?
+    jb hn06                   ; yes: not this button
+    cmp dl, 51                ; button x^-1: is the click right of it?
+    ja hn06                   ; yes: not this button
+    mov al, 0                 ; button x^-1: the key code it stands for (0 = none yet)
+    mov dh, 4                 ; button x^-1: its top row
+    mov dl, 44                ; button x^-1: its left column
+    mov cl, 6                 ; button x^-1: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn06:
+    cmp dh, 4                 ; button nCr: is the click above its top row?
+    jb hn07                   ; yes: not this button
+    cmp dh, 6                 ; button nCr: is the click below its bottom row?
+    ja hn07                   ; yes: not this button
+    cmp dl, 52                ; button nCr: is the click left of it?
+    jb hn07                   ; yes: not this button
+    cmp dl, 59                ; button nCr: is the click right of it?
+    ja hn07                   ; yes: not this button
+    mov al, 'k'               ; button nCr: the key code it stands for (0 = none yet)
+    mov dh, 4                 ; button nCr: its top row
+    mov dl, 52                ; button nCr: its left column
+    mov cl, 6                 ; button nCr: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn07:
+    cmp dh, 4                 ; button Pol(: is the click above its top row?
+    jb hn08                   ; yes: not this button
+    cmp dh, 6                 ; button Pol(: is the click below its bottom row?
+    ja hn08                   ; yes: not this button
+    cmp dl, 60                ; button Pol(: is the click left of it?
+    jb hn08                   ; yes: not this button
+    cmp dl, 67                ; button Pol(: is the click right of it?
+    ja hn08                   ; yes: not this button
+    mov al, 0                 ; button Pol(: the key code it stands for (0 = none yet)
+    mov dh, 4                 ; button Pol(: its top row
+    mov dl, 60                ; button Pol(: its left column
+    mov cl, 6                 ; button Pol(: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn08:
+    cmp dh, 4                 ; button x^3: is the click above its top row?
+    jb hn09                   ; yes: not this button
+    cmp dh, 6                 ; button x^3: is the click below its bottom row?
+    ja hn09                   ; yes: not this button
+    cmp dl, 68                ; button x^3: is the click left of it?
+    jb hn09                   ; yes: not this button
+    cmp dl, 75                ; button x^3: is the click right of it?
+    ja hn09                   ; yes: not this button
+    mov al, 'x'               ; button x^3: the key code it stands for (0 = none yet)
+    mov dh, 4                 ; button x^3: its top row
+    mov dl, 68                ; button x^3: its left column
+    mov cl, 6                 ; button x^3: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn09:
+    cmp dh, 7                 ; button a b/c: is the click above its top row?
+    jb hn10                   ; yes: not this button
+    cmp dh, 9                 ; button a b/c: is the click below its bottom row?
+    ja hn10                   ; yes: not this button
+    cmp dl, 4                 ; button a b/c: is the click left of it?
+    jb hn10                   ; yes: not this button
+    cmp dl, 11                ; button a b/c: is the click right of it?
+    ja hn10                   ; yes: not this button
+    mov al, 0                 ; button a b/c: the key code it stands for (0 = none yet)
+    mov dh, 7                 ; button a b/c: its top row
+    mov dl, 4                 ; button a b/c: its left column
+    mov cl, 6                 ; button a b/c: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn10:
+    cmp dh, 7                 ; button v: is the click above its top row?
+    jb hn11                   ; yes: not this button
+    cmp dh, 9                 ; button v: is the click below its bottom row?
+    ja hn11                   ; yes: not this button
+    cmp dl, 12                ; button v: is the click left of it?
+    jb hn11                   ; yes: not this button
+    cmp dl, 19                ; button v: is the click right of it?
+    ja hn11                   ; yes: not this button
+    mov al, 'q'               ; button v: the key code it stands for (0 = none yet)
+    mov dh, 7                 ; button v: its top row
+    mov dl, 12                ; button v: its left column
+    mov cl, 6                 ; button v: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn11:
+    cmp dh, 7                 ; button x?: is the click above its top row?
+    jb hn12                   ; yes: not this button
+    cmp dh, 9                 ; button x?: is the click below its bottom row?
+    ja hn12                   ; yes: not this button
+    cmp dl, 20                ; button x?: is the click left of it?
+    jb hn12                   ; yes: not this button
+    cmp dl, 27                ; button x?: is the click right of it?
+    ja hn12                   ; yes: not this button
+    mov al, 's'               ; button x?: the key code it stands for (0 = none yet)
+    mov dh, 7                 ; button x?: its top row
+    mov dl, 20                ; button x?: its left column
+    mov cl, 6                 ; button x?: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn12:
+    cmp dh, 7                 ; button ^: is the click above its top row?
+    jb hn13                   ; yes: not this button
+    cmp dh, 9                 ; button ^: is the click below its bottom row?
+    ja hn13                   ; yes: not this button
+    cmp dl, 28                ; button ^: is the click left of it?
+    jb hn13                   ; yes: not this button
+    cmp dl, 35                ; button ^: is the click right of it?
+    ja hn13                   ; yes: not this button
+    mov al, '^'               ; button ^: the key code it stands for (0 = none yet)
+    mov dh, 7                 ; button ^: its top row
+    mov dl, 28                ; button ^: its left column
+    mov cl, 6                 ; button ^: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn13:
+    cmp dh, 7                 ; button log: is the click above its top row?
+    jb hn14                   ; yes: not this button
+    cmp dh, 9                 ; button log: is the click below its bottom row?
+    ja hn14                   ; yes: not this button
+    cmp dl, 36                ; button log: is the click left of it?
+    jb hn14                   ; yes: not this button
+    cmp dl, 43                ; button log: is the click right of it?
+    ja hn14                   ; yes: not this button
+    mov al, 0                 ; button log: the key code it stands for (0 = none yet)
+    mov dh, 7                 ; button log: its top row
+    mov dl, 36                ; button log: its left column
+    mov cl, 6                 ; button log: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn14:
+    cmp dh, 7                 ; button ln: is the click above its top row?
+    jb hn15                   ; yes: not this button
+    cmp dh, 9                 ; button ln: is the click below its bottom row?
+    ja hn15                   ; yes: not this button
+    cmp dl, 44                ; button ln: is the click left of it?
+    jb hn15                   ; yes: not this button
+    cmp dl, 51                ; button ln: is the click right of it?
+    ja hn15                   ; yes: not this button
+    mov al, 0                 ; button ln: the key code it stands for (0 = none yet)
+    mov dh, 7                 ; button ln: its top row
+    mov dl, 44                ; button ln: its left column
+    mov cl, 6                 ; button ln: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn15:
+    cmp dh, 7                 ; button (-): is the click above its top row?
+    jb hn16                   ; yes: not this button
+    cmp dh, 9                 ; button (-): is the click below its bottom row?
+    ja hn16                   ; yes: not this button
+    cmp dl, 52                ; button (-): is the click left of it?
+    jb hn16                   ; yes: not this button
+    cmp dl, 59                ; button (-): is the click right of it?
+    ja hn16                   ; yes: not this button
+    mov al, 'n'               ; button (-): the key code it stands for (0 = none yet)
+    mov dh, 7                 ; button (-): its top row
+    mov dl, 52                ; button (-): its left column
+    mov cl, 6                 ; button (-): its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn16:
+    cmp dh, 7                 ; button DMS: is the click above its top row?
+    jb hn17                   ; yes: not this button
+    cmp dh, 9                 ; button DMS: is the click below its bottom row?
+    ja hn17                   ; yes: not this button
+    cmp dl, 60                ; button DMS: is the click left of it?
+    jb hn17                   ; yes: not this button
+    cmp dl, 67                ; button DMS: is the click right of it?
+    ja hn17                   ; yes: not this button
+    mov al, 0                 ; button DMS: the key code it stands for (0 = none yet)
+    mov dh, 7                 ; button DMS: its top row
+    mov dl, 60                ; button DMS: its left column
+    mov cl, 6                 ; button DMS: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn17:
+    cmp dh, 7                 ; button hyp: is the click above its top row?
+    jb hn18                   ; yes: not this button
+    cmp dh, 9                 ; button hyp: is the click below its bottom row?
+    ja hn18                   ; yes: not this button
+    cmp dl, 68                ; button hyp: is the click left of it?
+    jb hn18                   ; yes: not this button
+    cmp dl, 75                ; button hyp: is the click right of it?
+    ja hn18                   ; yes: not this button
+    mov al, 0                 ; button hyp: the key code it stands for (0 = none yet)
+    mov dh, 7                 ; button hyp: its top row
+    mov dl, 68                ; button hyp: its left column
+    mov cl, 6                 ; button hyp: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn18:
+    cmp dh, 10                ; button sin: is the click above its top row?
+    jb hn19                   ; yes: not this button
+    cmp dh, 12                ; button sin: is the click below its bottom row?
+    ja hn19                   ; yes: not this button
+    cmp dl, 4                 ; button sin: is the click left of it?
+    jb hn19                   ; yes: not this button
+    cmp dl, 11                ; button sin: is the click right of it?
+    ja hn19                   ; yes: not this button
+    mov al, 0                 ; button sin: the key code it stands for (0 = none yet)
+    mov dh, 10                ; button sin: its top row
+    mov dl, 4                 ; button sin: its left column
+    mov cl, 6                 ; button sin: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn19:
+    cmp dh, 10                ; button cos: is the click above its top row?
+    jb hn20                   ; yes: not this button
+    cmp dh, 12                ; button cos: is the click below its bottom row?
+    ja hn20                   ; yes: not this button
+    cmp dl, 12                ; button cos: is the click left of it?
+    jb hn20                   ; yes: not this button
+    cmp dl, 19                ; button cos: is the click right of it?
+    ja hn20                   ; yes: not this button
+    mov al, 0                 ; button cos: the key code it stands for (0 = none yet)
+    mov dh, 10                ; button cos: its top row
+    mov dl, 12                ; button cos: its left column
+    mov cl, 6                 ; button cos: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn20:
+    cmp dh, 10                ; button tan: is the click above its top row?
+    jb hn21                   ; yes: not this button
+    cmp dh, 12                ; button tan: is the click below its bottom row?
+    ja hn21                   ; yes: not this button
+    cmp dl, 20                ; button tan: is the click left of it?
+    jb hn21                   ; yes: not this button
+    cmp dl, 27                ; button tan: is the click right of it?
+    ja hn21                   ; yes: not this button
+    mov al, 0                 ; button tan: the key code it stands for (0 = none yet)
+    mov dh, 10                ; button tan: its top row
+    mov dl, 20                ; button tan: its left column
+    mov cl, 6                 ; button tan: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn21:
+    cmp dh, 10                ; button RCL: is the click above its top row?
+    jb hn22                   ; yes: not this button
+    cmp dh, 12                ; button RCL: is the click below its bottom row?
+    ja hn22                   ; yes: not this button
+    cmp dl, 28                ; button RCL: is the click left of it?
+    jb hn22                   ; yes: not this button
+    cmp dl, 35                ; button RCL: is the click right of it?
+    ja hn22                   ; yes: not this button
+    mov al, 'r'               ; button RCL: the key code it stands for (0 = none yet)
+    mov dh, 10                ; button RCL: its top row
+    mov dl, 28                ; button RCL: its left column
+    mov cl, 6                 ; button RCL: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn22:
+    cmp dh, 10                ; button ENG: is the click above its top row?
+    jb hn23                   ; yes: not this button
+    cmp dh, 12                ; button ENG: is the click below its bottom row?
+    ja hn23                   ; yes: not this button
+    cmp dl, 36                ; button ENG: is the click left of it?
+    jb hn23                   ; yes: not this button
+    cmp dl, 43                ; button ENG: is the click right of it?
+    ja hn23                   ; yes: not this button
+    mov al, 0                 ; button ENG: the key code it stands for (0 = none yet)
+    mov dh, 10                ; button ENG: its top row
+    mov dl, 36                ; button ENG: its left column
+    mov cl, 6                 ; button ENG: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn23:
+    cmp dh, 10                ; button (: is the click above its top row?
+    jb hn24                   ; yes: not this button
+    cmp dh, 12                ; button (: is the click below its bottom row?
+    ja hn24                   ; yes: not this button
+    cmp dl, 44                ; button (: is the click left of it?
+    jb hn24                   ; yes: not this button
+    cmp dl, 51                ; button (: is the click right of it?
+    ja hn24                   ; yes: not this button
+    mov al, 0                 ; button (: the key code it stands for (0 = none yet)
+    mov dh, 10                ; button (: its top row
+    mov dl, 44                ; button (: its left column
+    mov cl, 6                 ; button (: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn24:
+    cmp dh, 10                ; button ): is the click above its top row?
+    jb hn25                   ; yes: not this button
+    cmp dh, 12                ; button ): is the click below its bottom row?
+    ja hn25                   ; yes: not this button
+    cmp dl, 52                ; button ): is the click left of it?
+    jb hn25                   ; yes: not this button
+    cmp dl, 59                ; button ): is the click right of it?
+    ja hn25                   ; yes: not this button
+    mov al, 0                 ; button ): the key code it stands for (0 = none yet)
+    mov dh, 10                ; button ): its top row
+    mov dl, 52                ; button ): its left column
+    mov cl, 6                 ; button ): its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn25:
+    cmp dh, 10                ; button ,: is the click above its top row?
+    jb hn26                   ; yes: not this button
+    cmp dh, 12                ; button ,: is the click below its bottom row?
+    ja hn26                   ; yes: not this button
+    cmp dl, 60                ; button ,: is the click left of it?
+    jb hn26                   ; yes: not this button
+    cmp dl, 67                ; button ,: is the click right of it?
+    ja hn26                   ; yes: not this button
+    mov al, 0                 ; button ,: the key code it stands for (0 = none yet)
+    mov dh, 10                ; button ,: its top row
+    mov dl, 60                ; button ,: its left column
+    mov cl, 6                 ; button ,: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn26:
+    cmp dh, 10                ; button M+: is the click above its top row?
+    jb hn27                   ; yes: not this button
+    cmp dh, 12                ; button M+: is the click below its bottom row?
+    ja hn27                   ; yes: not this button
+    cmp dl, 68                ; button M+: is the click left of it?
+    jb hn27                   ; yes: not this button
+    cmp dl, 75                ; button M+: is the click right of it?
+    ja hn27                   ; yes: not this button
+    mov al, 'm'               ; button M+: the key code it stands for (0 = none yet)
+    mov dh, 10                ; button M+: its top row
+    mov dl, 68                ; button M+: its left column
+    mov cl, 6                 ; button M+: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn27:
+    cmp dh, 13                ; button 7: is the click above its top row?
+    jb hn28                   ; yes: not this button
+    cmp dh, 15                ; button 7: is the click below its bottom row?
+    ja hn28                   ; yes: not this button
+    cmp dl, 5                 ; button 7: is the click left of it?
+    jb hn28                   ; yes: not this button
+    cmp dl, 18                ; button 7: is the click right of it?
+    ja hn28                   ; yes: not this button
+    mov al, '7'               ; button 7: the key code it stands for (0 = none yet)
+    mov dh, 13                ; button 7: its top row
+    mov dl, 5                 ; button 7: its left column
+    mov cl, 12                ; button 7: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn28:
+    cmp dh, 13                ; button 8: is the click above its top row?
+    jb hn29                   ; yes: not this button
+    cmp dh, 15                ; button 8: is the click below its bottom row?
+    ja hn29                   ; yes: not this button
+    cmp dl, 19                ; button 8: is the click left of it?
+    jb hn29                   ; yes: not this button
+    cmp dl, 32                ; button 8: is the click right of it?
+    ja hn29                   ; yes: not this button
+    mov al, '8'               ; button 8: the key code it stands for (0 = none yet)
+    mov dh, 13                ; button 8: its top row
+    mov dl, 19                ; button 8: its left column
+    mov cl, 12                ; button 8: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn29:
+    cmp dh, 13                ; button 9: is the click above its top row?
+    jb hn30                   ; yes: not this button
+    cmp dh, 15                ; button 9: is the click below its bottom row?
+    ja hn30                   ; yes: not this button
+    cmp dl, 33                ; button 9: is the click left of it?
+    jb hn30                   ; yes: not this button
+    cmp dl, 46                ; button 9: is the click right of it?
+    ja hn30                   ; yes: not this button
+    mov al, '9'               ; button 9: the key code it stands for (0 = none yet)
+    mov dh, 13                ; button 9: its top row
+    mov dl, 33                ; button 9: its left column
+    mov cl, 12                ; button 9: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn30:
+    cmp dh, 13                ; button DEL: is the click above its top row?
+    jb hn31                   ; yes: not this button
+    cmp dh, 15                ; button DEL: is the click below its bottom row?
+    ja hn31                   ; yes: not this button
+    cmp dl, 47                ; button DEL: is the click left of it?
+    jb hn31                   ; yes: not this button
+    cmp dl, 60                ; button DEL: is the click right of it?
+    ja hn31                   ; yes: not this button
+    mov al, 8                 ; button DEL: the key code it stands for (0 = none yet)
+    mov dh, 13                ; button DEL: its top row
+    mov dl, 47                ; button DEL: its left column
+    mov cl, 12                ; button DEL: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn31:
+    cmp dh, 13                ; button AC: is the click above its top row?
+    jb hn32                   ; yes: not this button
+    cmp dh, 15                ; button AC: is the click below its bottom row?
+    ja hn32                   ; yes: not this button
+    cmp dl, 61                ; button AC: is the click left of it?
+    jb hn32                   ; yes: not this button
+    cmp dl, 74                ; button AC: is the click right of it?
+    ja hn32                   ; yes: not this button
+    mov al, 'C'               ; button AC: the key code it stands for (0 = none yet)
+    mov dh, 13                ; button AC: its top row
+    mov dl, 61                ; button AC: its left column
+    mov cl, 12                ; button AC: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn32:
+    cmp dh, 16                ; button 4: is the click above its top row?
+    jb hn33                   ; yes: not this button
+    cmp dh, 18                ; button 4: is the click below its bottom row?
+    ja hn33                   ; yes: not this button
+    cmp dl, 5                 ; button 4: is the click left of it?
+    jb hn33                   ; yes: not this button
+    cmp dl, 18                ; button 4: is the click right of it?
+    ja hn33                   ; yes: not this button
+    mov al, '4'               ; button 4: the key code it stands for (0 = none yet)
+    mov dh, 16                ; button 4: its top row
+    mov dl, 5                 ; button 4: its left column
+    mov cl, 12                ; button 4: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn33:
+    cmp dh, 16                ; button 5: is the click above its top row?
+    jb hn34                   ; yes: not this button
+    cmp dh, 18                ; button 5: is the click below its bottom row?
+    ja hn34                   ; yes: not this button
+    cmp dl, 19                ; button 5: is the click left of it?
+    jb hn34                   ; yes: not this button
+    cmp dl, 32                ; button 5: is the click right of it?
+    ja hn34                   ; yes: not this button
+    mov al, '5'               ; button 5: the key code it stands for (0 = none yet)
+    mov dh, 16                ; button 5: its top row
+    mov dl, 19                ; button 5: its left column
+    mov cl, 12                ; button 5: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn34:
+    cmp dh, 16                ; button 6: is the click above its top row?
+    jb hn35                   ; yes: not this button
+    cmp dh, 18                ; button 6: is the click below its bottom row?
+    ja hn35                   ; yes: not this button
+    cmp dl, 33                ; button 6: is the click left of it?
+    jb hn35                   ; yes: not this button
+    cmp dl, 46                ; button 6: is the click right of it?
+    ja hn35                   ; yes: not this button
+    mov al, '6'               ; button 6: the key code it stands for (0 = none yet)
+    mov dh, 16                ; button 6: its top row
+    mov dl, 33                ; button 6: its left column
+    mov cl, 12                ; button 6: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn35:
+    cmp dh, 16                ; button *: is the click above its top row?
+    jb hn36                   ; yes: not this button
+    cmp dh, 18                ; button *: is the click below its bottom row?
+    ja hn36                   ; yes: not this button
+    cmp dl, 47                ; button *: is the click left of it?
+    jb hn36                   ; yes: not this button
+    cmp dl, 60                ; button *: is the click right of it?
+    ja hn36                   ; yes: not this button
+    mov al, '*'               ; button *: the key code it stands for (0 = none yet)
+    mov dh, 16                ; button *: its top row
+    mov dl, 47                ; button *: its left column
+    mov cl, 12                ; button *: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn36:
+    cmp dh, 16                ; button ?: is the click above its top row?
+    jb hn37                   ; yes: not this button
+    cmp dh, 18                ; button ?: is the click below its bottom row?
+    ja hn37                   ; yes: not this button
+    cmp dl, 61                ; button ?: is the click left of it?
+    jb hn37                   ; yes: not this button
+    cmp dl, 74                ; button ?: is the click right of it?
+    ja hn37                   ; yes: not this button
+    mov al, '/'               ; button ?: the key code it stands for (0 = none yet)
+    mov dh, 16                ; button ?: its top row
+    mov dl, 61                ; button ?: its left column
+    mov cl, 12                ; button ?: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn37:
+    cmp dh, 19                ; button 1: is the click above its top row?
+    jb hn38                   ; yes: not this button
+    cmp dh, 21                ; button 1: is the click below its bottom row?
+    ja hn38                   ; yes: not this button
+    cmp dl, 5                 ; button 1: is the click left of it?
+    jb hn38                   ; yes: not this button
+    cmp dl, 18                ; button 1: is the click right of it?
+    ja hn38                   ; yes: not this button
+    mov al, '1'               ; button 1: the key code it stands for (0 = none yet)
+    mov dh, 19                ; button 1: its top row
+    mov dl, 5                 ; button 1: its left column
+    mov cl, 12                ; button 1: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn38:
+    cmp dh, 19                ; button 2: is the click above its top row?
+    jb hn39                   ; yes: not this button
+    cmp dh, 21                ; button 2: is the click below its bottom row?
+    ja hn39                   ; yes: not this button
+    cmp dl, 19                ; button 2: is the click left of it?
+    jb hn39                   ; yes: not this button
+    cmp dl, 32                ; button 2: is the click right of it?
+    ja hn39                   ; yes: not this button
+    mov al, '2'               ; button 2: the key code it stands for (0 = none yet)
+    mov dh, 19                ; button 2: its top row
+    mov dl, 19                ; button 2: its left column
+    mov cl, 12                ; button 2: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn39:
+    cmp dh, 19                ; button 3: is the click above its top row?
+    jb hn40                   ; yes: not this button
+    cmp dh, 21                ; button 3: is the click below its bottom row?
+    ja hn40                   ; yes: not this button
+    cmp dl, 33                ; button 3: is the click left of it?
+    jb hn40                   ; yes: not this button
+    cmp dl, 46                ; button 3: is the click right of it?
+    ja hn40                   ; yes: not this button
+    mov al, '3'               ; button 3: the key code it stands for (0 = none yet)
+    mov dh, 19                ; button 3: its top row
+    mov dl, 33                ; button 3: its left column
+    mov cl, 12                ; button 3: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn40:
+    cmp dh, 19                ; button +: is the click above its top row?
+    jb hn41                   ; yes: not this button
+    cmp dh, 21                ; button +: is the click below its bottom row?
+    ja hn41                   ; yes: not this button
+    cmp dl, 47                ; button +: is the click left of it?
+    jb hn41                   ; yes: not this button
+    cmp dl, 60                ; button +: is the click right of it?
+    ja hn41                   ; yes: not this button
+    mov al, '+'               ; button +: the key code it stands for (0 = none yet)
+    mov dh, 19                ; button +: its top row
+    mov dl, 47                ; button +: its left column
+    mov cl, 12                ; button +: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn41:
+    cmp dh, 19                ; button -: is the click above its top row?
+    jb hn42                   ; yes: not this button
+    cmp dh, 21                ; button -: is the click below its bottom row?
+    ja hn42                   ; yes: not this button
+    cmp dl, 61                ; button -: is the click left of it?
+    jb hn42                   ; yes: not this button
+    cmp dl, 74                ; button -: is the click right of it?
+    ja hn42                   ; yes: not this button
+    mov al, '-'               ; button -: the key code it stands for (0 = none yet)
+    mov dh, 19                ; button -: its top row
+    mov dl, 61                ; button -: its left column
+    mov cl, 12                ; button -: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn42:
+    cmp dh, 22                ; button 0: is the click above its top row?
+    jb hn43                   ; yes: not this button
+    cmp dh, 24                ; button 0: is the click below its bottom row?
+    ja hn43                   ; yes: not this button
+    cmp dl, 5                 ; button 0: is the click left of it?
+    jb hn43                   ; yes: not this button
+    cmp dl, 18                ; button 0: is the click right of it?
+    ja hn43                   ; yes: not this button
+    mov al, '0'               ; button 0: the key code it stands for (0 = none yet)
+    mov dh, 22                ; button 0: its top row
+    mov dl, 5                 ; button 0: its left column
+    mov cl, 12                ; button 0: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn43:
+    cmp dh, 22                ; button .: is the click above its top row?
+    jb hn44                   ; yes: not this button
+    cmp dh, 24                ; button .: is the click below its bottom row?
+    ja hn44                   ; yes: not this button
+    cmp dl, 19                ; button .: is the click left of it?
+    jb hn44                   ; yes: not this button
+    cmp dl, 32                ; button .: is the click right of it?
+    ja hn44                   ; yes: not this button
+    mov al, '.'               ; button .: the key code it stands for (0 = none yet)
+    mov dh, 22                ; button .: its top row
+    mov dl, 19                ; button .: its left column
+    mov cl, 12                ; button .: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn44:
+    cmp dh, 22                ; button EXP: is the click above its top row?
+    jb hn45                   ; yes: not this button
+    cmp dh, 24                ; button EXP: is the click below its bottom row?
+    ja hn45                   ; yes: not this button
+    cmp dl, 33                ; button EXP: is the click left of it?
+    jb hn45                   ; yes: not this button
+    cmp dl, 46                ; button EXP: is the click right of it?
+    ja hn45                   ; yes: not this button
+    mov al, 'e'               ; button EXP: the key code it stands for (0 = none yet)
+    mov dh, 22                ; button EXP: its top row
+    mov dl, 33                ; button EXP: its left column
+    mov cl, 12                ; button EXP: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn45:
+    cmp dh, 22                ; button Ans: is the click above its top row?
+    jb hn46                   ; yes: not this button
+    cmp dh, 24                ; button Ans: is the click below its bottom row?
+    ja hn46                   ; yes: not this button
+    cmp dl, 47                ; button Ans: is the click left of it?
+    jb hn46                   ; yes: not this button
+    cmp dl, 60                ; button Ans: is the click right of it?
+    ja hn46                   ; yes: not this button
+    mov al, 'a'               ; button Ans: the key code it stands for (0 = none yet)
+    mov dh, 22                ; button Ans: its top row
+    mov dl, 47                ; button Ans: its left column
+    mov cl, 12                ; button Ans: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn46:
+    cmp dh, 22                ; button =: is the click above its top row?
+    jb hn47                   ; yes: not this button
+    cmp dh, 24                ; button =: is the click below its bottom row?
+    ja hn47                   ; yes: not this button
+    cmp dl, 61                ; button =: is the click left of it?
+    jb hn47                   ; yes: not this button
+    cmp dl, 74                ; button =: is the click right of it?
+    ja hn47                   ; yes: not this button
+    mov al, '='               ; button =: the key code it stands for (0 = none yet)
+    mov dh, 22                ; button =: its top row
+    mov dl, 61                ; button =: its left column
+    mov cl, 12                ; button =: its inner width
+    jmp mouse_hit             ; light it up and report the key
+hn47:
+    mov al, 0                 ; the click was not on any button
+    ret                       ; back
+mouse_hit:
+    push ax                   ; keep the key code safe
+    call do_flash             ; light up the clicked button
+    pop ax                    ; get the key code back
+    ret                       ; back to main_loop with AL = key code
+check_mouse endp
+
+key_flash proc                ; AL = key code: light up its button, if it has one
+    push ax                   ; keep AX safe
+    push bx                   ; keep BX safe
+    push cx                   ; keep CX safe
+    push dx                   ; keep DX safe
+    cmp al, 'k'               ; is it key k?
+    jne kf_n01                ; no: try the next key
+    mov dh, 4                 ; row of the button nCr
+    mov dl, 52                ; column of the button
+    mov cl, 6                 ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n01:
+    cmp al, 'x'               ; is it key x?
+    jne kf_n02                ; no: try the next key
+    mov dh, 4                 ; row of the button x^3
+    mov dl, 68                ; column of the button
+    mov cl, 6                 ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n02:
+    cmp al, 'q'               ; is it key q?
+    jne kf_n03                ; no: try the next key
+    mov dh, 7                 ; row of the button v
+    mov dl, 12                ; column of the button
+    mov cl, 6                 ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n03:
+    cmp al, 's'               ; is it key s?
+    jne kf_n04                ; no: try the next key
+    mov dh, 7                 ; row of the button x?
+    mov dl, 20                ; column of the button
+    mov cl, 6                 ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n04:
+    cmp al, '^'               ; is it key ^?
+    jne kf_n05                ; no: try the next key
+    mov dh, 7                 ; row of the button ^
+    mov dl, 28                ; column of the button
+    mov cl, 6                 ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n05:
+    cmp al, 'n'               ; is it key n?
+    jne kf_n06                ; no: try the next key
+    mov dh, 7                 ; row of the button (-)
+    mov dl, 52                ; column of the button
+    mov cl, 6                 ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n06:
+    cmp al, 'r'               ; is it key r?
+    jne kf_n07                ; no: try the next key
+    mov dh, 10                ; row of the button RCL
+    mov dl, 28                ; column of the button
+    mov cl, 6                 ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n07:
+    cmp al, 'm'               ; is it key m?
+    jne kf_n08                ; no: try the next key
+    mov dh, 10                ; row of the button M+
+    mov dl, 68                ; column of the button
+    mov cl, 6                 ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n08:
+    cmp al, '7'               ; is it key 7?
+    jne kf_n09                ; no: try the next key
+    mov dh, 13                ; row of the button 7
+    mov dl, 5                 ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n09:
+    cmp al, '8'               ; is it key 8?
+    jne kf_n10                ; no: try the next key
+    mov dh, 13                ; row of the button 8
+    mov dl, 19                ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n10:
+    cmp al, '9'               ; is it key 9?
+    jne kf_n11                ; no: try the next key
+    mov dh, 13                ; row of the button 9
+    mov dl, 33                ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n11:
+    cmp al, 8                 ; is it Backspace?
+    jne kf_n12                ; no: try the next key
+    mov dh, 13                ; row of the button DEL
+    mov dl, 47                ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n12:
+    cmp al, 'C'               ; is it key C?
+    jne kf_n13                ; no: try the next key
+    mov dh, 13                ; row of the button AC
+    mov dl, 61                ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n13:
+    cmp al, 'c'               ; is it a small c?
+    jne kf_n14                ; no: try the next key
+    mov dh, 13                ; row of the button AC
+    mov dl, 61                ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n14:
+    cmp al, '4'               ; is it key 4?
+    jne kf_n15                ; no: try the next key
+    mov dh, 16                ; row of the button 4
+    mov dl, 5                 ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n15:
+    cmp al, '5'               ; is it key 5?
+    jne kf_n16                ; no: try the next key
+    mov dh, 16                ; row of the button 5
+    mov dl, 19                ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n16:
+    cmp al, '6'               ; is it key 6?
+    jne kf_n17                ; no: try the next key
+    mov dh, 16                ; row of the button 6
+    mov dl, 33                ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n17:
+    cmp al, '*'               ; is it key *?
+    jne kf_n18                ; no: try the next key
+    mov dh, 16                ; row of the button *
+    mov dl, 47                ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n18:
+    cmp al, '/'               ; is it key /?
+    jne kf_n19                ; no: try the next key
+    mov dh, 16                ; row of the button ?
+    mov dl, 61                ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n19:
+    cmp al, '1'               ; is it key 1?
+    jne kf_n20                ; no: try the next key
+    mov dh, 19                ; row of the button 1
+    mov dl, 5                 ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n20:
+    cmp al, '2'               ; is it key 2?
+    jne kf_n21                ; no: try the next key
+    mov dh, 19                ; row of the button 2
+    mov dl, 19                ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n21:
+    cmp al, '3'               ; is it key 3?
+    jne kf_n22                ; no: try the next key
+    mov dh, 19                ; row of the button 3
+    mov dl, 33                ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n22:
+    cmp al, '+'               ; is it key +?
+    jne kf_n23                ; no: try the next key
+    mov dh, 19                ; row of the button +
+    mov dl, 47                ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n23:
+    cmp al, '-'               ; is it key -?
+    jne kf_n24                ; no: try the next key
+    mov dh, 19                ; row of the button -
+    mov dl, 61                ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n24:
+    cmp al, '0'               ; is it key 0?
+    jne kf_n25                ; no: try the next key
+    mov dh, 22                ; row of the button 0
+    mov dl, 5                 ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n25:
+    cmp al, 'e'               ; is it key e?
+    jne kf_n26                ; no: try the next key
+    mov dh, 22                ; row of the button EXP
+    mov dl, 33                ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n26:
+    cmp al, 'a'               ; is it key a?
+    jne kf_n27                ; no: try the next key
+    mov dh, 22                ; row of the button Ans
+    mov dl, 47                ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n27:
+    cmp al, '='               ; is it key =?
+    jne kf_n28                ; no: try the next key
+    mov dh, 22                ; row of the button =
+    mov dl, 61                ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n28:
+    cmp al, 13                ; is it Enter?
+    jne kf_n29                ; no: try the next key
+    mov dh, 22                ; row of the button =
+    mov dl, 61                ; column of the button
+    mov cl, 12                ; inner width of the button
+    jmp kf_go                 ; light it up
+kf_n29:
+    jmp kf_done               ; this key has no button
+kf_go:
+    call do_flash             ; light up the button
+kf_done:
+    pop dx                    ; get DX back
+    pop cx                    ; get CX back
+    pop bx                    ; get BX back
+    pop ax                    ; get AX back
+    ret                       ; back
+key_flash endp
 ;----------------------------------------------------------------
 show_entry proc               ; draws the typed number, right-aligned
     mov dh, 2                 ; row 2
@@ -1003,3 +2110,11 @@ op    db 0                    ; 0 = nothing waiting, '+' = plus waiting
 fresh db 0                    ; 1 = the next digit starts a new number
 ans   dw 0                    ; the last answer
 mem   dw 0                    ; the memory (M+ and RCL)
+mouse_ok   db 0               ; 1 = a mouse was found
+mouse_down db 0               ; 1 = the left mouse button is held down
+fb_row db 0                   ; row of the button being painted
+fb_col db 0                   ; column of the button being painted
+fb_w   db 0                   ; whole width of the button being painted
+fb_attr db 0                  ; color used for painting
+fb_i   db 0                   ; row counter while painting
+fb_j   db 0                   ; column counter while painting
