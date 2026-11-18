@@ -17,7 +17,7 @@ call draw_keypad              ; rows 4-24
 call init_mouse               ; look for a mouse and show its pointer
 ;---------------------------------------------------------------------------------------input handling------------
 main_loop:
-    mov ah, 1                 ; keyboard job 1: is a key waiting?
+    mov ah, 0                 ; keyboard job 9: is a key waiting?
     int 16h                   ; Calls the BIOS keyboard service.
     jnz ml_key                ; if a key is waiting:jump to ml_key 
     
@@ -27,7 +27,7 @@ main_loop:
     jmp ml_got                ; if a mouse button was clicked, process is key value
     
 ml_key:
-    mov ah, 0                 ; keyboard job 0: wait for a key
+    mov ah, 0                ; keyboard job 0: wait for a key
     int 16h                   ; AL = the ASCII code of the key
     call key_flash            ; light up the button that belongs to this key 
 ;------------------------------------------------------------How the calculator understand which button is pressed-----    
@@ -284,9 +284,9 @@ draw_keypad proc              ; every button written out by hand
     mov dh, 7                 ; row 7: button log
     mov dl, 36                ; column 36
     mov si, offset lbl14      ; address of the text of log
-    call draw_btn6            ; draw the button (inner width 6)
+    call draw_btn6            ; draw the button (inner width 6)                                                                                
     mov dh, 7                 ; row 7: button ln
-    mov dl, 44                ; column 44
+    mov dl, 44                ; column 44                                                                                                     
     mov si, offset lbl15      ; address of the text of ln
     call draw_btn6            ; draw the button (inner width 6)
     mov dh, 7                 ; row 7: button (-)

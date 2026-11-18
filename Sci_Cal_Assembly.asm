@@ -76,9 +76,9 @@ ml_got:
     cmp al, 'M'               ; is it a capital M (M minus)?
     je do_mminus              ; yes: subtract from the memory
     cmp al, '0'               ; below '0'?
-    jb ml_ignore              ; not a digit, wait for the next key
+    jb ml_more                ; not a digit: try the added scientific keys
     cmp al, '9'               ; above '9'?
-    ja ml_ignore              ; not a digit, wait for the next key
+    ja ml_more                ; not a digit: try the added scientific keys
     call add_digit            ; it is a digit: store it and show it
     jmp main_loop             ; wait for the next key
 ml_ignore:
@@ -562,37 +562,55 @@ put_char endp
 
 ;---------------- new procedures---------------------------------------
 add_digit proc                ; AL = the digit character
+    push bx                   ; keep the caller's registers safe
+    push cx
+    push dx
     cmp byte ptr [fresh], 0   ; is the display showing an old number?
-    je ad_go                  ; no: carry on typing
+    je ad_go                  ; no: continue the current entry
     mov byte ptr [fresh], 0   ; yes: start a new number
-    mov byte ptr [len], 0     ; no digits
+    mov byte ptr [len], 0     ; no digits yet
     mov byte ptr [buf], '$'   ; empty text
     mov word ptr [cur], 0     ; number = 0
 ad_go:
     mov bl, [len]             ; BL = digits typed so far
     cmp bl, 1                 ; exactly one digit?
-    jne ad_check              ; no: skip the zero fix
-    cmp byte ptr [buf], '0'   ; is that digit a 0?
-    jne ad_check              ; no: skip the zero fix
-    mov bl, 0                 ; yes: the new digit replaces the 0
+    jne ad_check              ; no: skip the leading-zero check
+    cmp byte ptr [buf], '0'   ; is that digit a zero?
+    jne ad_check              ; no: keep it
+    mov bl, 0                 ; yes: replace that zero
+    mov byte ptr [len], 0     ; entry is now empty
+    mov word ptr [cur], 0     ; reset the numeric value too
 ad_check:
-    cmp bl, 4                 ; room for only 4 digits for now
+    cmp bl, 5                 ; at most five digits are allowed
     jae ad_done               ; full: ignore this key
-    mov bh, 0                 ; BX = BL, to use as a position
-    mov [buf+bx], al          ; store the digit character
-    inc bx                    ; one more digit
-    mov byte ptr [buf+bx], '$'; keep the text ending with $
+    sub al, '0'               ; character -> numeric digit
+    mov ah, 0                 ; AX = digit from 0 to 9
+    mov cx, ax                ; keep the digit in CX
+    mov ax, [cur]             ; AX = number typed so far
+    mov dx, 10                ; multiply old value by ten
+    mul dx                    ; DX:AX = old value * 10
+    cmp dx, 0                 ; did multiplication exceed 16 bits?
+    jne ad_error              ; yes: outside the supported range
+    add ax, cx                ; append the new digit
+    cmp ax, 7FFFh             ; is it greater than 32767?
+    ja ad_error               ; yes: show an error instead of wrapping
+    mov [cur], ax             ; save the checked number
+    mov al, cl                ; get the digit again
+    add al, '0'               ; numeric digit -> character
+    mov bh, 0                 ; BX = current text position
+    mov [buf+bx], al          ; store the character
+    inc bl                    ; one more digit
     mov [len], bl             ; save the new length
-    sub al, '0'               ; character -> number (for example '7' -> 7)
-    mov ah, 0                 ; AX = the digit as a number
-    mov cx, ax                ; keep it in CX
-    mov ax, [cur]             ; AX = the number so far
-    mov dx, 10                ; DX = 10
-    mul dx                    ; AX = AX * 10
-    add ax, cx                ; add the new digit
-    mov [cur], ax             ; save the bigger number
+    mov bh, 0                 ; make BX a clean buffer index
+    mov byte ptr [buf+bx], '$'; keep the text ending with $
     call show_entry           ; redraw the display
+    jmp ad_done               ; finish normally
+ad_error:
+    call show_error           ; value is outside the supported range
 ad_done:
+    pop dx                    ; restore registers
+    pop cx
+    pop bx
     ret                       ; back
 add_digit endp
 del_digit proc                ; removes the last typed digit   
@@ -687,6 +705,11 @@ ca_not_mul:
     jne ca_error              ; unknown operator (should not happen)
     cmp word ptr [cur], 0     ; dividing by zero?
     je ca_error               ; yes: error
+    cmp ax, 8000h             ; is the first number -32768?
+    jne ca_divide             ; no: normal signed division is safe
+    cmp word ptr [cur], -1    ; would the divisor be -1?
+    je ca_error               ; -32768 / -1 cannot fit in signed 16 bits
+ca_divide:
     cwd                       ; stretch AX into DX:AX (needed before dividing)
     idiv word ptr [cur]       ; AX = DX:AX / cur (signed), DX = remainder
 ca_ok:
@@ -822,10 +845,15 @@ press_ans proc                ; the Ans button
 press_ans endp
 
 press_mplus proc              ; the M+ button
-    mov ax, [cur]             ; AX = the current number
-    add [mem], ax             ; add it to the memory
+    mov ax, [mem]             ; AX = the current memory value
+    add ax, [cur]             ; add the current number
+    jo pmp_error              ; signed overflow: do not save a wrapped value
+    mov [mem], ax             ; save the checked result
     mov byte ptr [fresh], 2   ; the next digit starts a new number
     call show_memflag         ; show or hide the M on the top row
+    ret                       ; back
+pmp_error:
+    call show_error           ; report memory overflow
     ret                       ; back
 press_mplus endp
 
@@ -881,8 +909,7 @@ dm_not_ncr:
     jc dm_error               ; carry set: error
     jmp dm_ok                 ; done
 dm_other:
-    mov dl, 0                 ; not one of ^ e k p
-    ret                       ; back
+    jmp do_more2              ; also check GCD, LCM and MOD operators
 dm_ok:
     mov dl, 1                 ; AX holds the answer
     ret                       ; back
@@ -996,10 +1023,15 @@ pf_error:
 press_fact endp
 
 press_mminus proc             ; the capital M key: subtract from the memory
-    mov ax, [cur]             ; AX = the current number
-    sub [mem], ax             ; subtract it from the memory
+    mov ax, [mem]             ; AX = the current memory value
+    sub ax, [cur]             ; subtract the current number
+    jo pmm_error              ; signed overflow: do not save a wrapped value
+    mov [mem], ax             ; save the checked result
     mov byte ptr [fresh], 2   ; the next digit starts a new number
     call show_memflag         ; show or hide the M on the top row
+    ret                       ; back
+pmm_error:
+    call show_error           ; report memory overflow
     ret                       ; back
 press_mminus endp
 
@@ -1326,7 +1358,7 @@ hn13:
     jb hn14                   ; yes: not this button
     cmp dl, 43                ; button log: is the click right of it?
     ja hn14                   ; yes: not this button
-    mov al, 0                 ; button log: the key code it stands for (0 = none yet)
+    mov al, 'j'               ; button log: run its implemented function
     mov dh, 7                 ; button log: its top row
     mov dl, 36                ; button log: its left column
     mov cl, 6                 ; button log: its inner width
@@ -1396,7 +1428,7 @@ hn18:
     jb hn19                   ; yes: not this button
     cmp dl, 11                ; button sin: is the click right of it?
     ja hn19                   ; yes: not this button
-    mov al, 0                 ; button sin: the key code it stands for (0 = none yet)
+    mov al, 'd'               ; button sin: run its implemented function
     mov dh, 10                ; button sin: its top row
     mov dl, 4                 ; button sin: its left column
     mov cl, 6                 ; button sin: its inner width
@@ -1410,7 +1442,7 @@ hn19:
     jb hn20                   ; yes: not this button
     cmp dl, 19                ; button cos: is the click right of it?
     ja hn20                   ; yes: not this button
-    mov al, 0                 ; button cos: the key code it stands for (0 = none yet)
+    mov al, 'y'               ; button cos: run its implemented function
     mov dh, 10                ; button cos: its top row
     mov dl, 12                ; button cos: its left column
     mov cl, 6                 ; button cos: its inner width
@@ -1424,7 +1456,7 @@ hn20:
     jb hn21                   ; yes: not this button
     cmp dl, 27                ; button tan: is the click right of it?
     ja hn21                   ; yes: not this button
-    mov al, 0                 ; button tan: the key code it stands for (0 = none yet)
+    mov al, 't'               ; button tan: run its implemented function
     mov dh, 10                ; button tan: its top row
     mov dl, 20                ; button tan: its left column
     mov cl, 6                 ; button tan: its inner width
@@ -2103,7 +2135,7 @@ lbl47    db '     =      ','$'   ; =
 b_row db 0                    ; row of the button being drawn
 b_col db 0                    ; column of the button being drawn
 len db 0                      ; how many digits are typed
-buf db 17 dup('$')            ; the digits, ending with $ 
+buf db 17 dup('$')            ; text buffer (up to 16 characters plus $) 
 cur   dw 0                    ; the number being typed
 first dw 0                    ; the number saved when + was pressed
 op    db 0                    ; 0 = nothing waiting, '+' = plus waiting
@@ -2117,4 +2149,528 @@ fb_col db 0                   ; column of the button being painted
 fb_w   db 0                   ; whole width of the button being painted
 fb_attr db 0                  ; color used for painting
 fb_i   db 0                   ; row counter while painting
-fb_j   db 0                   ; column counter while painting
+fb_j   db 0                   ; column counter while painting   
+
+;=====================================================================
+; SCIENTIFIC CALCULATOR ADDITIONS
+; These routines are integrated into main_loop and calculate below.
+; Two-number operators: g = GCD, l = LCM, o = MOD.
+; One-number keys: b = absolute value, f = Fibonacci, z = prime test,
+; h = hexadecimal display, i = binary display, u = cube root,
+; j = log10, w = log2, v = random 0..99, % = integer percent,
+; d = sine, y = cosine, t = tangent (trig answers are scaled by 1000).
+; The keypad log and trigonometry buttons are connected to implemented keys.
+;=====================================================================
+
+;---------------- extra key dispatcher ----------------
+ml_more:                      ; reached when the key was not a digit and not an old key
+    cmp al, 'g'               ; is it g (GCD)?
+    jne mm_n01                ; no: try the next one
+    jmp do_op                 ; yes: treat it as an operator (do_op calls press_operator)
+mm_n01:
+    cmp al, 'l'               ; is it l (LCM)?
+    jne mm_n02                ; no: try the next one
+    jmp do_op                 ; yes: operator
+mm_n02:
+    cmp al, 'o'               ; is it o (MOD)?
+    jne mm_n03                ; no: try the next one
+    jmp do_op                 ; yes: operator
+mm_n03:
+    cmp al, 'b'               ; is it b (absolute value)?
+    jne mm_n04                ; no: try the next one
+    call press_abs            ; do it
+    jmp main_loop             ; wait for the next key
+mm_n04:
+    cmp al, 'f'               ; is it f (Fibonacci)?
+    jne mm_n05                ; no: try the next one
+    call press_fib            ; do it
+    jmp main_loop             ; wait for the next key
+mm_n05:
+    cmp al, 'z'               ; is it z (prime test)?
+    jne mm_n06                ; no: try the next one
+    call press_prime          ; do it
+    jmp main_loop             ; wait for the next key
+mm_n06:
+    cmp al, 'h'               ; is it h (hex)?
+    jne mm_n07                ; no: try the next one
+    call press_hex            ; do it
+    jmp main_loop             ; wait for the next key
+mm_n07:
+    cmp al, 'i'               ; is it i (binary)?
+    jne mm_n08                ; no: try the next one
+    call press_bin            ; do it
+    jmp main_loop             ; wait for the next key
+mm_n08:
+    cmp al, 'u'               ; is it u (cube root)?
+    jne mm_n09                ; no: try the next one
+    call press_cbrt           ; do it
+    jmp main_loop             ; wait for the next key
+mm_n09:
+    cmp al, 'j'               ; is it j (log10)?
+    jne mm_n10                ; no: try the next one
+    call press_log10          ; do it
+    jmp main_loop             ; wait for the next key
+mm_n10:
+    cmp al, 'w'               ; is it w (log2)?
+    jne mm_n11                ; no: try the next one
+    call press_log2           ; do it
+    jmp main_loop             ; wait for the next key
+mm_n11:
+    cmp al, 'v'               ; is it v (random)?
+    jne mm_n12                ; no: try the next one
+    call press_rand           ; do it
+    jmp main_loop             ; wait for the next key
+mm_n12:
+    cmp al, '%'               ; is it % (divide by 100)?
+    jne mm_n13                ; no: try the next one
+    call press_percent        ; do it
+    jmp main_loop             ; wait for the next key
+mm_n13:
+    cmp al, 'd'               ; is it d (sin)?
+    jne mm_n14                ; no: try the next one
+    call press_sin            ; do it
+    jmp main_loop             ; wait for the next key
+mm_n14:
+    cmp al, 'y'               ; is it y (cos)?
+    jne mm_n15                ; no: try the next one
+    call press_cos            ; do it
+    jmp main_loop             ; wait for the next key
+mm_n15:
+    cmp al, 't'               ; is it t (tan)?
+    jne mm_end                ; no: it is a key we do not know
+    call press_tan            ; do it
+mm_end:
+    jmp main_loop             ; ignore the key and wait for the next one
+
+;---------------- two-number operators: g l o ----------------
+do_more2 proc                 ; same rules as do_more: DL = 0 other, 1 = AX holds answer, 2 = error
+    cmp byte ptr [op], 'g'    ; GCD?
+    jne dm2_n1                ; no: try the next one
+    call do_gcd               ; AX = gcd(first, cur)
+    jc dm2_error              ; carry set: error
+    jmp dm2_ok                ; done
+dm2_n1:
+    cmp byte ptr [op], 'l'    ; LCM?
+    jne dm2_n2                ; no: try the next one
+    call do_lcm               ; AX = lcm(first, cur)
+    jc dm2_error              ; carry set: error
+    jmp dm2_ok                ; done
+dm2_n2:
+    cmp byte ptr [op], 'o'    ; MOD?
+    jne dm2_other             ; no: it is not one of ours
+    call do_mod               ; AX = first mod cur
+    jc dm2_error              ; carry set: error
+    jmp dm2_ok                ; done
+dm2_other:
+    mov dl, 0                 ; not one of g l o (this is the old dm_other code)
+    ret                       ; back
+dm2_ok:
+    mov dl, 1                 ; AX holds the answer
+    ret                       ; back
+dm2_error:
+    mov dl, 2                 ; there was an error
+    ret                       ; back
+do_more2 endp
+
+gcd_core proc                 ; AX and BX = two positive numbers (unsigned) -> AX = their GCD
+gc_loop:
+    cmp bx, 0                 ; is the second number 0?
+    je gc_done                ; yes: AX holds the answer
+    xor dx, dx                ; clear DX before dividing
+    div bx                    ; DX = AX mod BX
+    mov ax, bx                ; the old second number becomes the first
+    mov bx, dx                ; the remainder becomes the second
+    jmp gc_loop               ; repeat (Euclid's method)
+gc_done:
+    ret                       ; back
+gcd_core endp
+
+do_gcd proc                   ; AX = gcd(first, cur). Carry flag = error
+    mov ax, [first]           ; AX = first number
+    cmp ax, 0                 ; negative?
+    jge dg_a                  ; no: keep it
+    neg ax                    ; yes: GCD ignores the sign
+dg_a:
+    mov bx, [cur]             ; BX = second number
+    cmp bx, 0                 ; negative?
+    jge dg_b                  ; no: keep it
+    neg bx                    ; yes: GCD ignores the sign
+dg_b:
+    call gcd_core             ; AX = the GCD
+    cmp ax, 7FFFh             ; too big to be a signed number?
+    ja dg_error               ; yes: error (only happens for -32768)
+    clc                       ; carry = 0: no error
+    ret                       ; back
+dg_error:
+    stc                       ; carry = 1: there was an error
+    ret                       ; back
+do_gcd endp
+
+do_lcm proc                   ; AX = lcm(first, cur). Carry flag = error
+    mov ax, [first]           ; AX = first number
+    cmp ax, 0                 ; negative?
+    jge lc_a                  ; no: keep it
+    neg ax                    ; yes: make it positive
+lc_a:
+    mov bx, [cur]             ; BX = second number
+    cmp bx, 0                 ; negative?
+    jge lc_b                  ; no: keep it
+    neg bx                    ; yes: make it positive
+lc_b:
+    cmp ax, 0                 ; is the first number 0?
+    je lc_zero                ; yes: the answer is 0
+    cmp bx, 0                 ; is the second number 0?
+    je lc_zero                ; yes: the answer is 0
+    push ax                   ; keep the first number
+    push bx                   ; keep the second number
+    call gcd_core             ; AX = gcd (this destroys AX, BX and DX)
+    mov cx, ax                ; CX = the gcd
+    pop bx                    ; get the second number back
+    pop ax                    ; get the first number back
+    xor dx, dx                ; clear DX before dividing
+    div cx                    ; AX = first / gcd
+    mul bx                    ; DX:AX = (first / gcd) * second = the LCM
+    cmp dx, 0                 ; did it spill into DX?
+    jne lc_error              ; yes: too big
+    cmp ax, 7FFFh             ; too big for a signed number?
+    ja lc_error               ; yes: error
+    clc                       ; carry = 0: no error
+    ret                       ; back
+lc_zero:
+    mov ax, 0                 ; LCM with 0 is 0
+    clc                       ; carry = 0: no error
+    ret                       ; back
+lc_error:
+    stc                       ; carry = 1: there was an error
+    ret                       ; back
+do_lcm endp
+
+do_mod proc                   ; AX = first mod cur. Carry flag = error
+    mov bx, [cur]             ; BX = the divisor
+    cmp bx, 0                 ; dividing by zero?
+    je md_error               ; yes: error
+    mov ax, [first]           ; AX = the number being divided
+    cmp bx, -1                ; divisor is -1?
+    je md_zero                ; yes: the remainder is always 0 (also avoids idiv overflow)
+    cwd                       ; stretch AX into DX:AX
+    idiv bx                   ; DX = the remainder (signed)
+    mov ax, dx                ; AX = the remainder
+    clc                       ; carry = 0: no error
+    ret                       ; back
+md_zero:
+    mov ax, 0                 ; remainder is 0
+    clc                       ; carry = 0: no error
+    ret                       ; back
+md_error:
+    stc                       ; carry = 1: there was an error
+    ret                       ; back
+do_mod endp
+
+;---------------- one-number keys ----------------
+press_abs proc                ; b: absolute value
+    mov ax, [cur]             ; AX = the current number
+    cmp ax, 0                 ; negative?
+    jge pab_ok                ; no: nothing to change
+    neg ax                    ; flip the sign
+    cmp ax, 8000h             ; was it -32768? (it cannot be flipped)
+    je pab_error              ; yes: error
+pab_ok:
+    call show_value           ; show it
+    ret                       ; back
+pab_error:
+    call show_error           ; show E
+    ret                       ; back
+press_abs endp
+
+press_fib proc                ; f: Fibonacci number n (n = 0 to 23)
+    mov cx, [cur]             ; CX = n
+    cmp cx, 0                 ; below zero?
+    jl pfi_error              ; yes: error
+    cmp cx, 23                ; above 23? (F24 does not fit in a signed number)
+    jg pfi_error              ; yes: error
+    mov ax, 0                 ; AX = the older number (F0 = 0)
+    mov bx, 1                 ; BX = the newer number (F1 = 1)
+pfi_loop:
+    cmp cx, 0                 ; any steps left?
+    je pfi_done               ; no: AX holds F(n)
+    mov dx, ax                ; DX = older
+    add dx, bx                ; DX = older + newer = the next number
+    mov ax, bx                ; the newer one becomes the older one
+    mov bx, dx                ; the sum becomes the newer one
+    dec cx                    ; one step fewer
+    jmp pfi_loop              ; repeat
+pfi_done:
+    call show_value           ; show it
+    ret                       ; back
+pfi_error:
+    call show_error           ; show E
+    ret                       ; back
+press_fib endp
+
+press_prime proc              ; z: shows 1 when the number is prime, otherwise 0
+    mov bx, [cur]             ; BX = the number to test
+    cmp bx, 2                 ; below 2?
+    jl ppr_no                 ; yes: not prime
+    mov cx, 2                 ; CX = the divisor we try
+ppr_loop:
+    mov ax, cx                ; AX = divisor
+    mul ax                    ; DX:AX = divisor * divisor
+    cmp ax, bx                ; is divisor squared bigger than the number?
+    ja ppr_yes                ; yes: no divisor found, it is prime
+    mov ax, bx                ; AX = the number
+    xor dx, dx                ; clear DX before dividing
+    div cx                    ; DX = number mod divisor
+    cmp dx, 0                 ; divides exactly?
+    je ppr_no                 ; yes: not prime
+    inc cx                    ; try the next divisor
+    jmp ppr_loop              ; repeat
+ppr_yes:
+    mov ax, 1                 ; answer 1 = prime
+    jmp ppr_show              ; go and show it
+ppr_no:
+    mov ax, 0                 ; answer 0 = not prime
+ppr_show:
+    call show_value           ; show it
+    ret                       ; back
+press_prime endp
+
+press_hex proc                ; h: shows the current number in hexadecimal (the number itself is not changed)
+    mov ax, [cur]             ; AX = the number
+    mov si, 0                 ; SI = position in buf
+    mov cx, 4                 ; 4 hex digits
+ph_loop:
+    push cx                   ; keep the loop counter safe
+    mov cl, 4                 ; rotate by 4 bits ...
+    rol ax, cl                ; ... so the top 4 bits come to the bottom
+    pop cx                    ; get the loop counter back
+    mov bx, ax                ; BX = rotated number
+    and bx, 000Fh             ; keep only the lowest 4 bits (0 to 15)
+    mov dl, [hexdig+bx]       ; look up the digit character
+    mov [buf+si], dl          ; store it in buf
+    inc si                    ; next position
+    loop ph_loop              ; repeat for all 4 digits
+    mov byte ptr [buf+si], '$'; end the text
+    mov byte ptr [len], 4     ; 4 characters
+    call show_entry           ; draw it
+    mov byte ptr [fresh], 2   ; the next digit starts a new number
+    ret                       ; back
+press_hex endp
+
+press_bin proc                ; i: shows the current number in binary (the number itself is not changed)
+    mov ax, [cur]             ; AX = the number
+    mov si, 0                 ; SI = position in buf
+    mov cx, 16                ; 16 bits
+pbn_loop:
+    rol ax, 1                 ; top bit goes into the carry flag
+    mov dl, '0'               ; assume the bit is 0 (mov does not change the carry flag)
+    jnc pbn_store             ; carry clear: it really was 0
+    mov dl, '1'               ; carry set: the bit was 1
+pbn_store:
+    mov [buf+si], dl          ; store the character
+    inc si                    ; next position
+    loop pbn_loop             ; repeat for all 16 bits
+    mov byte ptr [buf+si], '$'; end the text (buf has room for 16 + 1)
+    mov byte ptr [len], 16    ; 16 characters
+    call show_entry           ; draw it
+    mov byte ptr [fresh], 2   ; the next digit starts a new number
+    ret                       ; back
+press_bin endp
+
+press_cbrt proc               ; u: cube root, rounded down
+    mov ax, [cur]             ; AX = the number
+    cmp ax, 0                 ; below zero?
+    jl pcb_error              ; yes: this calculator does not do that
+    mov bx, 0                 ; BX = the root found so far
+pcb_loop:
+    mov ax, bx                ; AX = BX
+    inc ax                    ; AX = BX + 1
+    mov cx, ax                ; CX = BX + 1
+    mul ax                    ; DX:AX = (BX+1) squared
+    mul cx                    ; DX:AX = (BX+1) cubed
+    cmp dx, 0                 ; did it spill over 16 bits?
+    jne pcb_done              ; yes: it is certainly bigger than the number
+    cmp ax, [cur]             ; is the cube bigger than the number?
+    ja pcb_done               ; yes: BX is the answer
+    inc bx                    ; no: try the next root
+    jmp pcb_loop              ; repeat
+pcb_done:
+    mov ax, bx                ; AX = the root
+    call show_value           ; show it
+    ret                       ; back
+pcb_error:
+    call show_error           ; show E
+    ret                       ; back
+press_cbrt endp
+
+press_log10 proc              ; j: log10, rounded down (counts how many times it can be divided by 10)
+    mov ax, [cur]             ; AX = the number
+    cmp ax, 1                 ; below 1? (log is not defined)
+    jl plg_error              ; yes: error
+    mov bx, 0                 ; BX = the answer so far
+    mov cx, 10                ; CX = 10
+plg_loop:
+    cmp ax, 10                ; is the number below 10?
+    jb plg_done               ; yes: finished
+    xor dx, dx                ; clear DX before dividing
+    div cx                    ; AX = AX / 10
+    inc bx                    ; one more power of ten
+    jmp plg_loop              ; repeat
+plg_done:
+    mov ax, bx                ; AX = the answer
+    call show_value           ; show it
+    ret                       ; back
+plg_error:
+    call show_error           ; show E
+    ret                       ; back
+press_log10 endp
+
+press_log2 proc               ; w: log2, rounded down (counts how many times it can be halved)
+    mov ax, [cur]             ; AX = the number
+    cmp ax, 1                 ; below 1? (log is not defined)
+    jl pl2_error              ; yes: error
+    mov bx, 0                 ; BX = the answer so far
+pl2_loop:
+    cmp ax, 1                 ; is the number down to 1?
+    jbe pl2_done              ; yes: finished
+    shr ax, 1                 ; AX = AX / 2
+    inc bx                    ; one more power of two
+    jmp pl2_loop              ; repeat
+pl2_done:
+    mov ax, bx                ; AX = the answer
+    call show_value           ; show it
+    ret                       ; back
+pl2_error:
+    call show_error           ; show E
+    ret                       ; back
+press_log2 endp
+
+press_percent proc            ; %: divides the current number by 100
+    mov ax, [cur]             ; AX = the current number
+    cwd                       ; stretch AX into DX:AX
+    mov cx, 100               ; CX = 100
+    idiv cx                   ; AX = AX / 100 (cannot overflow)
+    call show_value           ; show it
+    ret                       ; back
+press_percent endp
+
+press_rand proc               ; v: random number from 0 to 99 (uses the clock)
+    mov ah, 0                 ; clock job 0: read the tick counter
+    int 1Ah                   ; DX = low part of the tick count
+    mov ax, dx                ; AX = ticks
+    xor dx, dx                ; clear DX before dividing
+    mov cx, 100               ; CX = 100
+    div cx                    ; DX = ticks mod 100
+    mov ax, dx                ; AX = the random number
+    call show_value           ; show it
+    ret                       ; back
+press_rand endp
+
+;---------------- trigonometry (degrees, answers multiplied by 1000) ----------------
+angle_norm proc               ; AX = the current number as an angle from 0 to 359
+    mov ax, [cur]             ; AX = the angle typed
+    cwd                       ; stretch AX into DX:AX
+    mov cx, 360               ; CX = a full turn
+    idiv cx                   ; DX = remainder, may be negative
+    mov ax, dx                ; AX = the remainder
+    cmp ax, 0                 ; below zero?
+    jge an_ok                 ; no: already 0 to 359
+    add ax, 360               ; yes: turn it into 0 to 359
+an_ok:
+    ret                       ; back
+angle_norm endp
+
+sin_deg proc                  ; AX = angle 0 to 359 -> AX = sin x 1000
+    mov bx, ax                ; BX = the angle
+    mov dl, 0                 ; DL = 1 when the answer must be negative
+    cmp bx, 90                ; 0 to 90?
+    jbe sd_look               ; yes: the table can be used directly
+    cmp bx, 180               ; 91 to 180?
+    ja sd_third               ; no: go on
+    mov ax, 180               ; sin(a) = sin(180 - a)
+    sub ax, bx                ; AX = 180 - angle
+    mov bx, ax                ; use it as the table position
+    jmp sd_look               ; look it up
+sd_third:
+    cmp bx, 270               ; 181 to 270?
+    ja sd_fourth              ; no: go on
+    sub bx, 180               ; sin(a) = -sin(a - 180)
+    mov dl, 1                 ; the answer is negative
+    jmp sd_look               ; look it up
+sd_fourth:
+    mov ax, 360               ; 271 to 359: sin(a) = -sin(360 - a)
+    sub ax, bx                ; AX = 360 - angle
+    mov bx, ax                ; use it as the table position
+    mov dl, 1                 ; the answer is negative
+sd_look:
+    shl bx, 1                 ; each table entry is 2 bytes
+    mov ax, [sin_tab+bx]      ; AX = sin x 1000 from the table
+    cmp dl, 0                 ; must it be negative?
+    je sd_done                ; no: finished
+    neg ax                    ; yes: flip the sign
+sd_done:
+    ret                       ; back
+sin_deg endp
+
+press_sin proc                ; d: sin
+    call angle_norm           ; AX = angle 0 to 359
+    call sin_deg              ; AX = sin x 1000
+    call show_value           ; show it
+    ret                       ; back
+press_sin endp
+
+press_cos proc                ; y: cos (cos a = sin (a + 90))
+    call angle_norm           ; AX = angle 0 to 359
+    add ax, 90                ; shift by 90 degrees
+    cmp ax, 360               ; past a full turn?
+    jb pcs_ok                 ; no: fine
+    sub ax, 360               ; yes: wrap around
+pcs_ok:
+    call sin_deg              ; AX = cos x 1000
+    call show_value           ; show it
+    ret                       ; back
+press_cos endp
+
+press_tan proc                ; t: tan = sin x 1000 / cos
+    call angle_norm           ; AX = angle 0 to 359
+    push ax                   ; keep the angle
+    call sin_deg              ; AX = sin x 1000
+    mov si, ax                ; SI = sin x 1000
+    pop ax                    ; AX = the angle again
+    add ax, 90                ; cos a = sin (a + 90)
+    cmp ax, 360               ; past a full turn?
+    jb ptn_ok                 ; no: fine
+    sub ax, 360               ; yes: wrap around
+ptn_ok:
+    call sin_deg              ; AX = cos x 1000
+    mov bx, ax                ; BX = cos x 1000
+    cmp ax, 0                 ; negative?
+    jge ptn_abs               ; no: keep it
+    neg ax                    ; yes: look at its size only
+ptn_abs:
+    cmp ax, 31                ; is cos too close to 0? (the answer would not fit)
+    jb ptn_error              ; yes: error (90, 270 and angles very near them)
+    mov ax, si                ; AX = sin x 1000
+    mov cx, 1000              ; CX = 1000
+    imul cx                   ; DX:AX = sin x 1000 x 1000
+    idiv bx                   ; AX = sin x 1000 / cos = tan x 1000
+    call show_value           ; show it
+    ret                       ; back
+ptn_error:
+    call show_error           ; show E
+    ret                       ; back
+press_tan endp
+
+;=====================================================================
+; DATA (paste at the very end of the program, after  fb_j db 0)
+;=====================================================================
+sin_tab dw 0,17,35,52,70,87,105,122,139,156        ; sin 0 to 9 degrees, x 1000
+        dw 174,191,208,225,242,259,276,292,309,326 ; 10 to 19
+        dw 342,358,375,391,407,423,438,454,469,485 ; 20 to 29
+        dw 500,515,530,545,559,574,588,602,616,629 ; 30 to 39
+        dw 643,656,669,682,695,707,719,731,743,755 ; 40 to 49
+        dw 766,777,788,799,809,819,829,839,848,857 ; 50 to 59
+        dw 866,875,883,891,899,906,914,921,927,934 ; 60 to 69
+        dw 940,946,951,956,961,966,970,974,978,982 ; 70 to 79
+        dw 985,988,990,993,995,996,998,999,999,1000 ; 80 to 89
+        dw 1000                                    ; 90
+hexdig db '0123456789ABCDEF'                       ; hex digit characters
